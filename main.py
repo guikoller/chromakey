@@ -30,46 +30,65 @@ def open_image(img_name):
         print('Erro abrindo a imagem.\n')
         sys.exit()
     return img
+       
+def green_index(image):
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    
+    green_hue_lower = 30  # ~70 graus
+    green_hue_upper = 80  # ~170 graus
+    
+    h, s, v = cv2.split(hsv)
+    
+    mask = np.logical_and(h >= green_hue_lower, h <= green_hue_upper)
+    
+    green_idx = np.zeros_like(h, dtype=float)
+    green_idx[mask] = (1 - abs(h[mask] - ((green_hue_lower + green_hue_upper) / 2)) / 
+                       ((green_hue_upper - green_hue_lower) / 2))
+    
+    green_idx = green_idx * (s / 255.0) * (v / 255.0)
+        
+    return green_idx
 
-def chromakey(img, background_img):
-    img_float = img.astype(np.float32) / 255.0  # Normalizar para [0, 1]
+def merge(mask, img, background_img):
+    result = np.zeros_like(img)
     
-    # Calcular o índice de verdice
-    green_index = img_float[:, :, 1] - 0.5 * (img_float[:, :, 0] + img_float[:, :, 2])
+    # Convert to HSV to handle green removal
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    h, s, v = cv2.split(hsv)
     
-    # Criar uma máscara baseada no índice de verdice
-    threshold = 0.1
-    mask = (green_index < threshold).astype(np.float32)  # Mask for foreground
-    
-    # Refinar a máscara
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)  # Remove pequenos buracos
-    mask = cv2.GaussianBlur(mask, (3, 3), 0)  # Suavizar transições
-    
-    # Remoção de spill verde
-    spill_removal = np.copy(img_float)
-    spill_removal[:, :, 1] -= green_index * 0.3  # Reduz o verde nas áreas de spill
-    spill_removal = np.clip(spill_removal, 0, 1)
-    
-    # Redimensionar o background para corresponder ao tamanho da imagem de entrada
-    background = cv2.resize(background_img, (img.shape[1], img.shape[0]))
-    
-    # Aplicar blending com alpha baseado na máscara
-    mask = mask[:, :, None]  # Expandir dimensões para operação em cores
-    fg = spill_removal * mask
-    bg = background * (1 - mask)
-    result = fg + bg
-    
-    # Converter para uint8 para exibição
-    result = (result * 255).astype(np.uint8)
+    for i in range(mask.shape[0]):
+        for j in range(mask.shape[1]):
+            if mask[i, j] == 255:  # White: use background
+                result[i, j] = background_img[i, j]
+            elif mask[i, j] == 0:   # Black: use foreground
+                result[i, j] = img[i, j]
+            else:  # Remove green and blend
+                # Set saturation to 0 for pixels with green components
+                s[i, j] = 0
+                # Convert back to BGR
+                temp = cv2.cvtColor(cv2.merge([h[i:i+1, j:j+1], s[i:i+1, j:j+1], v[i:i+1, j:j+1]]), cv2.COLOR_HSV2BGR)
+                # Blend with background
+                alpha = mask[i, j] / 255.0
+                result[i, j] = (temp[0, 0] * (1 - alpha) + background_img[i, j] * alpha).astype(np.uint8)
     
     return result
+    
+    
+def chromakey(img, background_img):
+    background_img = cv2.resize(background_img, (img.shape[1], img.shape[0]))
+
+    mask = green_index(img)    
+    mask = cv2.normalize(mask, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U)
+    
+    # result = merge(mask, img, background_img)
+    
+    return mask
 
 def main():
     if not os.path.exists(OUTPUT_FOLDER):
         os.makedirs(OUTPUT_FOLDER)
     
-    background_img = cv2.imread(BACKGROUND_IMAGE, cv2.IMREAD_COLOR).astype(np.float32) / 255.0
+    background_img = cv2.imread(BACKGROUND_IMAGE, cv2.IMREAD_COLOR)
     images = open_all_images(INPUT_FOLDER)
     
     for img, filename in images:
